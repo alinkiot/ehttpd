@@ -1,7 +1,7 @@
 -module(ehttpd_server).
 -behaviour(gen_server).
 -include("ehttpd.hrl").
--export([start/3, stop/1, bind/4, reload_paths/2, rewrite/2, get_env/3]).
+-export([start/3, stop/1, bind/4, reload_paths/2, rewrite_path/2, rewrite_rule/2, get_env/3]).
 -export([start_link/3, init/1, handle_call/3, handle_info/2, handle_cast/2, code_change/3, terminate/2]).
 
 -record(state, { name }).
@@ -145,28 +145,45 @@ load_rewrite(Name, NewEnv) ->
         Path ->
             case file:read_file(Path) of
                 {ok, Data} ->
-                    Opts = [global, multiline, {capture, all_but_first, binary}],
-                    case re:run(Data, <<"^RewriteRule\s+([^\s]+)\s+([^\s\n]+)">>, Opts) of
-                        nomatch -> false;
-                        {match, Match} ->
-                            ehttpd_cache:insert({Name, rewrite}, Match)
-                    end;
+                    load_rewrite(Name, <<"RewriteRule">>, Data),
+                    load_rewrite(Name, <<"RewritePath">>, Data);
                 _ ->
                     false
             end
     end.
 
--spec rewrite(Name :: atom(), Path) -> Path when
+load_rewrite(Name, Key, Data) ->
+    Opts = [global, multiline, {capture, all_but_first, binary}],
+    case re:run(Data, <<"^", Key/binary, "\s+([^\s]+)\s+([^\s\n]+)">>, Opts) of
+        nomatch -> false;
+        {match, Match} ->
+            ehttpd_cache:insert({Name, Key}, Match)
+    end.
+
+
+
+-spec rewrite_path(Name :: atom(), Path) -> Path when
     Path :: binary().
-rewrite(Name, Path) ->
-    case ehttpd_cache:lookup({Name, rewrite}) of
+rewrite_path(Name, Path) ->
+    case ehttpd_cache:lookup({Name, <<"RewritePath">>}) of
         {error, notfound} ->
             Path;
         {ok, Rules} ->
-            rewrite_path(Rules, Path)
+            re_path(Rules, Path)
     end.
 
-rewrite_path([], Path) -> Path;
-rewrite_path([[Re, Replacement] | Rules], Path) ->
+-spec rewrite_rule(Name :: atom(), Path) -> Path when
+    Path :: binary().
+rewrite_rule(Name, Path) ->
+    case ehttpd_cache:lookup({Name, <<"RewriteRule">>}) of
+        {error, notfound} ->
+            Path;
+        {ok, Rules} ->
+            re_path(Rules, Path)
+    end.
+
+
+re_path([], Path) -> Path;
+re_path([[Re, Replacement] | Rules], Path) ->
     NewPath = re:replace(Path, Re, Replacement, [{return, binary}]),
-    rewrite_path(Rules, NewPath).
+    re_path(Rules, NewPath).

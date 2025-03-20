@@ -22,8 +22,7 @@ get_paths(Name, Env) ->
         {"/swaggers", ?MODULE, swagger_list},
         {"/swagger/:Name", ?MODULE, swagger},
         {"/[...]/swagger/:Name", ?MODULE, swagger},
-        {"/[...]/", ?MODULE, {index, Env}},
-        {"/[...]", ?MODULE, {dir, Env, []}}
+        {"/[...]", ?MODULE, {static, Name, Env}}
     ],
     {Handlers, Routers} = ehttpd_utils:check_module(Name),
     Routers1 = lists:concat([Router:route(Name, Env)|| Router <- Routers]),
@@ -46,7 +45,7 @@ create_route(Name, Mod, Path0, Method, MethodInfo, SWSchema) ->
               undefined -> [];
               Value -> Value
           end,
-    NewPath = ehttpd_server:rewrite(Name, Path0),
+    NewPath = ehttpd_server:rewrite_rule(Name, Path0),
     Path = re:replace(NewPath, <<"(\{([^\}]+)\})">>, <<":\\2">>, [global, {return, binary}]),
     {RealPath, State} = parse_path(Name, Mod, Path, Method, MethodInfo, SWSchema),
     NewRoutes = case lists:keyfind(RealPath, 1, Acc) of
@@ -92,15 +91,7 @@ save_permission(Path, Rule, MethodInfo) ->
     Desc = maps:get(<<"description">>, MethodInfo, <<>>),
     ehttpd_cache:insert({Rule, permission}, {Path, Summary, Desc}).
 
-init(Req, {index, #{docroot := DocRoot}}) ->
-    Path = cowboy_req:path(Req),
-    case binary:last(Path) == $/ of
-        true ->
-            Index = lists:concat([DocRoot, binary_to_list(<<Path/binary, "index.html">>)]),
-            init(Req, {file, Index, []});
-        false ->
-            init(Req, {dir, DocRoot, []})
-    end;
+
 
 %% hand swagger.json
 init(Req0, swagger_list) ->
@@ -145,7 +136,29 @@ init(Req0, swagger = Opts) ->
         end,
     {ok, Req, Opts};
 
-init(Req, Opts) ->
+
+init(Req, {static, Name, #{docroot := DocRoot}}) ->
+    Path = cowboy_req:path(Req),
+    Fun =
+        fun() ->
+            case binary:last(Path) == $/ of
+                true ->
+                    Index = lists:concat([DocRoot, binary_to_list(<<Path/binary, "index.html">>)]),
+                    cowboy_static:init(Req, {file, Index, []});
+                false ->
+                    case ehttpd_server:rewrite_path(Name, Path) of
+                        Path ->
+                            cowboy_static:init(Req, {dir, DocRoot, []});
+                        NewPath ->
+                            File = lists:concat([DocRoot, binary_to_list(NewPath)]),
+                            cowboy_static:init(Req, {file, File, []})
+                    end
+            end
+        end,
+    do_without_options(Req, Fun).
+
+
+do_without_options(Req, Fun) ->
     case ehttpd_req:method(Req) of
         <<"OPTIONS">> ->
             case ?ACCESS_CONTROL_ALLOW_HEADERS of
@@ -157,7 +170,7 @@ init(Req, Opts) ->
                     }, <<>>, Req)
             end;
         _ ->
-            cowboy_static:init(Req, Opts)
+            Fun()
     end.
 
 malformed_request(Req, State) ->
