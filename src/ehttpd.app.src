@@ -6,7 +6,8 @@
          asn1,
          stdlib,
          cowboy,
-         jiffy
+         jiffy,
+         erlydtl
      ]},
      {modules, []},
      {env, [
