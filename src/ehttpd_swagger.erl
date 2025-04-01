@@ -77,8 +77,8 @@ dtl_compile(Mod, TplPath, Vals, Opts) ->
     end.
 
 
-generate(Name, Handlers, Path, Hand) ->
-    BaseSchemas = load_base_schema(Path),
+generate(Name, Handlers, BasePath, Hand) ->
+    BaseSchemas = load_base_schema(BasePath),
     Fun =
         fun(Mod, Acc) ->
             check_mod_swagger(Name, Mod, Acc, Hand)
@@ -240,14 +240,18 @@ check_mod_swagger(Name, Mod, Schema, Hand) ->
 
 parse_schema(NewSchema, AccSchema, Hand) ->
     % add definitions to Acc
-    Definitions = maps:get(<<"definitions">>, AccSchema, #{}),
-    NewDefinitions = maps:get(<<"definitions">>, NewSchema, #{}),
-    Tags = maps:get(<<"tags">>, AccSchema, []),
-    NewTags = maps:get(<<"tags">>, NewSchema, []),
-    NewAccSchema = AccSchema#{
-        <<"definitions">> => maps:merge(Definitions, NewDefinitions),
-        <<"tags">> => lists:concat([Tags, NewTags])
-    },
+%%    Components = maps:get(<<"components">>, AccSchema, #{}),
+%%    Definitions = maps:get(<<"schemas">>, Components, #{}),
+%%    NewDefinitions = maps:get(<<"schemas">>, NewSchema, #{}),
+%%    Tags = maps:get(<<"tags">>, AccSchema, []),
+%%    NewTags = maps:get(<<"tags">>, NewSchema, []),
+%%    NewAccSchema = AccSchema#{
+%%        <<"components">> => Components#{
+%%            <<"schemas">> => maps:merge(Definitions, NewDefinitions)
+%%        },
+%%        <<"tags">> => lists:concat([Tags, NewTags])
+%%    },
+    NewAccSchema = deep_merge(AccSchema, maps:without([<<"paths">>], NewSchema)),
     % get paths from NewSchema
     Paths = maps:get(<<"paths">>, NewSchema, #{}),
     Fun =
@@ -260,15 +264,25 @@ parse_schema(NewSchema, AccSchema, Hand) ->
         end,
     maps:fold(Fun, NewAccSchema, Paths).
 
+deep_merge(Map1, Map2) ->
+    maps:fold(
+        fun(K, V2, Acc) ->
+            case maps:find(K, Acc) of
+                {ok, V1} when is_map(V1), is_map(V2) ->
+                    Acc#{K => deep_merge(V1, V2)};
+                {ok, V1} when is_list(V1), is_list(V2) ->
+                    Acc#{K => lists:concat([V1, V2])};
+                _ ->
+                    Acc#{K => V2}
+            end
+        end, Map1, Map2).
+
 
 do_method_fun(Path, Method, MethodInfo, SWSchemas, Hand) ->
     OperationId = ehttpd_router:get_operation_id(Path, Method),
     Paths = maps:get(<<"paths">>, SWSchemas, #{}),
     PreMethodInfo = MethodInfo#{
         <<"operationId">> => OperationId
-%%                <<"externalDocs">> => #{
-%%                    <<"url">> => get_doc_path(BinOpId)
-%%                }
     },
     Method1 = list_to_binary(string:to_upper(binary_to_list(Method))),
     NewPath = Hand(Path, Method1, PreMethodInfo, SWSchemas),
@@ -276,11 +290,19 @@ do_method_fun(Path, Method, MethodInfo, SWSchemas, Hand) ->
     SWSchemas#{
         <<"paths">> => Paths#{
             NewPath => MethodAcc#{
-                Method => maps:without([<<"extend">>, <<"permission">>], MethodInfo)
+                Method => remove_extend(MethodInfo)
             }
         }
     }.
 
+remove_extend(MethodInfo) ->
+    maps:fold(
+        fun(Key, Value, Acc) ->
+            case re:run(Key, <<"^x-">>, [unicode]) of
+                {match, _} -> Acc;
+                nomatch -> Acc#{Key => Value}
+            end
+        end, #{}, MethodInfo).
 
 get_path(Path, Map) when is_list(Path) ->
     get_path(list_to_binary(Path), Map);

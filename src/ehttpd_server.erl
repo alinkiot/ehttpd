@@ -3,6 +3,7 @@
 -include("ehttpd.hrl").
 -export([start/3, stop/1, bind/4, reload_paths/2, rewrite_path/2, rewrite_rule/2, get_env/3]).
 -export([start_link/3, init/1, handle_call/3, handle_info/2, handle_cast/2, code_change/3, terminate/2]).
+-export([get_permissions/1]).
 
 -record(state, { name }).
 -define(SERVER(Name), list_to_atom(lists:concat(['http_', Name]))).
@@ -18,8 +19,16 @@
 -spec start(Name :: atom(), Port :: integer(), Env :: env()) ->
     supervisor:startchild_ret().
 start(Name, Port, Env) ->
-    Child = {Name, {?MODULE, start_link, [Name, Port, Env]}, permanent, 5000, worker, [?MODULE]},
-    supervisor:start_child(ehttpd_sup, Child).
+    Child = spec(Name, Port, Env),
+    case supervisor:start_child(ehttpd_sup, Child) of
+        {ok, _Pid} ->
+            io:format("Start HTTP Server on http://127.0.0.1:~p~n", [Port]);
+        Error ->
+            logger:error("Start HTTP Server error: ~p", [Error])
+    end.
+
+spec(Name, Port, Env) ->
+    {Name, {?MODULE, start_link, [Name, Port, Env]}, permanent, 5000, worker, [?MODULE]}.
 
 -spec stop(Name :: atom()) -> ok.
 stop(Name) ->
@@ -46,6 +55,9 @@ get_env(Name, Key, Default) ->
             {error, Reason}
     end.
 
+get_permissions(Name) ->
+    ehttpd_cache:match({{Name, {'$1', permission}}, {'$2', '$3', '$4'}}).
+
 
 start_link(Name, Port, Env) ->
     gen_server:start_link({local, ?SERVER(Name)}, ?MODULE, [Name, Port, Env], []).
@@ -64,7 +76,7 @@ init([Name, Port, Env]) ->
 
 handle_call(stop, _From, #state{name = Name} = State) ->
     Reply = cowboy:stop_listener(Name),
-    ehttpd_cache:delete({Name, env}),
+    ehttdp_cache:match_delete({{Name, '_'}, '_'}),
     {stop, normal, Reply, State};
 
 handle_call(_Request, _From, State) ->
@@ -99,7 +111,7 @@ start_server(Name, Port, Env) ->
     end.
 
 get_dispatch(Name, Env) ->
-    Dispatch = ehttpd_router:get_paths(Name, Env),
+    Dispatch = ehttpd_router:generate_paths(Name, Env),
     cowboy_router:compile([{'_', Dispatch}]).
 
 
@@ -130,8 +142,7 @@ format_path(Value) ->
             Dir = code:priv_dir(list_to_atom(App)),
             filename:join([Dir, Path1]);
         "priv/" ++ _ = Path ->
-            {file, Here} = code:is_loaded(?MODULE),
-            Dir = filename:dirname(filename:dirname(Here)),
+            Dir = code:priv_dir(ehttpd),
             filename:join([Dir, Path]);
         Path ->
             Path
