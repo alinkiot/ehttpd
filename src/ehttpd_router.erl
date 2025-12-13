@@ -2,7 +2,7 @@
 -include("ehttpd.hrl").
 
 %% API
--export([path/1, get_paths/2, get_state/2, parse_path/6]).
+-export([path/1, generate_paths/2, get_state/2, parse_path/6]).
 -export([get_operation_id/2]).
 
 %% Static Callback
@@ -17,21 +17,25 @@
 
 
 %% 获取路径
-get_paths(Name, Env) ->
+generate_paths(Name, #{ swagger := BasePath  } = Env) ->
     DefRoutes = [
         {"/swaggers", ?MODULE, swagger_list},
         {"/swagger/:Name", ?MODULE, swagger},
         {"/[...]/swagger/:Name", ?MODULE, swagger},
         {"/[...]", ?MODULE, {static, Name, Env}}
     ],
-    {Handlers, Routers} = ehttpd_utils:check_module(Name),
+    Routers = ehttpd_utils:apply_module_attributes(ehttpd_router, Name),
     Routers1 = lists:concat([Router:route(Name, Env)|| Router <- Routers]),
-    lists:concat([get_routes_by_swagger(Name, Handlers, Env), Routers1 ++ DefRoutes]).
+    Handlers = ehttpd_utils:apply_module_attributes(ehttpd_rest, Name),
+    Router2 = get_routes_by_swagger(Name, Handlers, BasePath),
+    lists:concat([Router2, Routers1, DefRoutes]).
 
 path(Name) ->
-    ehttpd_cache:match({{'$1', Name, router}, '$2'}).
+    ehttpd_cache:match({{Name, {'$1', router}}, '$2'}).
 
-get_routes_by_swagger(Name, Handlers, #{ swagger := BasePath  }) ->
+
+
+get_routes_by_swagger(Name, Handlers, BasePath) ->
     Fun =
         fun(Mod, Path, Method, MethodInfo, SWSchema) ->
             create_route(Name, Mod, Path, Method, MethodInfo, SWSchema)
@@ -62,9 +66,9 @@ create_route(Name, Mod, Path0, Method, MethodInfo, SWSchema) ->
 
 parse_path(Name, Mod, Path, Method, MethodInfo, SWSchema) ->
     OperationId = maps:get(<<"operationId">>, MethodInfo),
-    Extend = maps:get(<<"extend">>, MethodInfo, #{}),
-    Permission = maps:get(<<"permission">>, MethodInfo, <<>>),
-    save_permission(Path, Permission, MethodInfo),
+    Extend = maps:get(<<"x-extend">>, MethodInfo, #{}),
+    Permission = maps:get(<<"x-permission">>, MethodInfo, <<>>),
+    save_permission(Name, Path, Permission, MethodInfo),
     BasePath = maps:get(<<"basePath">>, SWSchema, <<>>),
     Config = #{
         extend => Extend,
@@ -85,11 +89,11 @@ parse_path(Name, Mod, Path, Method, MethodInfo, SWSchema) ->
     RealPath = <<BasePath/binary, Path/binary>>,
     {RealPath, State}.
 
-save_permission(_, <<>>, _) -> false;
-save_permission(Path, Rule, MethodInfo) ->
+save_permission(_, _, <<>>, _) -> ignore;
+save_permission(Name, Path, Rule, MethodInfo) ->
     Summary = maps:get(<<"summary">>, MethodInfo, <<>>),
     Desc = maps:get(<<"description">>, MethodInfo, <<>>),
-    ehttpd_cache:insert({Rule, permission}, {Path, Summary, Desc}).
+    ehttpd_cache:insert({Name, {Rule, permission}}, {Path, Summary, Desc}).
 
 
 
@@ -198,17 +202,26 @@ get_file(Req, State) ->
 get_check_request(Map, SWSchema) ->
     Parameters = maps:get(<<"parameters">>, Map, #{}),
     lists:foldl(
-        fun(#{<<"name">> := Name} = Parameter, Acc) ->
+        fun(Parameter, Acc) ->
             Parameter1 = maps:without([<<"name">>, <<"description">>, <<"schema">>, <<"default">>], Parameter),
-            case maps:get(<<"schema">>, Parameter, no) of
-                #{<<"$ref">> := <<"#/definitions/", DefName/binary>>} ->
+            case Parameter of
+                #{<<"$ref">> := Paths} ->
+                    {DefName, Props} = get_definitions(Paths, SWSchema),
                     [{DefName, Parameter1#{
-                        <<"properties">> => get_definitions(DefName, SWSchema)
+                        <<"properties">> => Props
+                    }} | Acc];
+                #{<<"schema">> := #{<<"$ref">> := Paths}} ->
+                    {DefName, Props} = get_definitions(Paths, SWSchema),
+                    [{DefName, Parameter1#{
+                        <<"properties">> => Props
                     }} | Acc];
                 _ ->
-                    [{Name, Parameter1} | Acc]
+                    DefName = maps:get(<<"name">>, Parameter),
+                    [{DefName, Parameter1} | Acc]
             end
         end, [], Parameters).
+
+
 
 get_check_response(Map, SWSchema) ->
     Responses = maps:get(<<"responses">>, Map, #{}),
@@ -225,8 +238,9 @@ parse_ref_schema(#{<<"description">> := _} = Schema, SWSchema) ->
     parse_ref_schema(maps:without([<<"description">>], Schema), SWSchema);
 parse_ref_schema(#{<<"schema">> := Schema}, SWSchema) ->
     parse_ref_schema(Schema, SWSchema);
-parse_ref_schema(#{<<"$ref">> := <<"#/definitions/", Name/binary>>}, SWSchema) ->
-    get_definitions(Name, SWSchema);
+parse_ref_schema(#{<<"$ref">> := Paths}, SWSchema) ->
+    {DefName, Props} = get_definitions(Paths, SWSchema),
+    #{ DefName => Props };
 parse_ref_schema(#{<<"type">> := <<"array">>, <<"items">> := Items} = Rule, SWSchema) ->
     Array = parse_ref_schema(Items, SWSchema),
     Rule#{<<"items">> => Array};
@@ -240,10 +254,17 @@ parse_ref_schema(#{<<"type">> := <<"object">>, <<"properties">> := Properties} =
 parse_ref_schema(Item, _SWSchema) ->
     Item.
 
-get_definitions(Name, SWSchema) ->
-    Definitions = maps:get(<<"definitions">>, SWSchema, #{}),
-    Definition = maps:get(Name, Definitions), %% to do
-    parse_ref_schema(Definition, SWSchema).
+
+get_definitions(<<"#/components/", Paths/binary>>, SWSchema) ->
+    Components = maps:get(<<"components">>, SWSchema, #{}),
+    List = re:split(Paths, <<"/">>, [{return, binary}]),
+    DefName = lists:last(List),
+    Definition =
+        lists:foldl(
+            fun(Key, Acc) ->
+                maps:get(Key, Acc)
+            end, Components, List),
+    {DefName, parse_ref_schema(Definition, SWSchema)}.
 
 get_operation_id(Path, Method) ->
     OId =
@@ -262,7 +283,8 @@ get_operation_id(Path, Method) ->
     list_to_atom(string:to_lower(binary_to_list(<<Method/binary, "_", OId/binary>>))).
 
 get_security(Map, SWSchema) ->
-    SecurityDefinitions = maps:get(<<"securityDefinitions">>, SWSchema, #{}),
+    Components = maps:get(<<"components">>, SWSchema, #{}),
+    SecurityDefinitions = maps:get(<<"securitySchemes">>, Components, #{}),
     AllTypes = maps:keys(SecurityDefinitions),
     GlobalSecurity = maps:get(<<"security">>, SWSchema, []),
     SecurityList = maps:get(<<"security">>, Map, GlobalSecurity),
@@ -295,7 +317,7 @@ get_produces(Map, SWSchema) ->
     maps:get(<<"produces">>, Map, maps:get(<<"produces">>, SWSchema, [])).
 
 set_state(Name, OperationId, State) ->
-    ehttpd_cache:insert({OperationId, Name, router}, State).
+    ehttpd_cache:insert({Name, {OperationId, router}}, State).
 
 get_state(Name, OperationId) ->
-    ehttpd_cache:lookup({OperationId, Name, router}).
+    ehttpd_cache:lookup({Name, {OperationId,  router}}).
