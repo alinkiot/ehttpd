@@ -184,9 +184,9 @@ rewrite_rule(Name, Path) ->
 
 re_path([], Path) -> Path;
 re_path([[Re, Replacement] | Rules], Path) ->
-    case re:replace(Path, Re, Replacement, [{return, binary}]) of
-        Path ->
+    case re:run(Path, Re) of
+        nomatch ->
             re_path(Rules, Path);
-        NewPath ->
-            NewPath
+        {match, _} ->
+            re:replace(Path, Re, Replacement, [{return, binary}])
     end.
