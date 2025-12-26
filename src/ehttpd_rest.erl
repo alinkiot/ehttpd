@@ -243,6 +243,8 @@ safe_handle_request(Type, Req0, #state{
             end,
         Args = [OperationID, Populated, Context, Req],
         case apply(LogicHandler, handle, Args) of
+            {ok, Req} ->
+                {ok, Req, State};
             {Status, Data} ->
                 reply(Status, Data, Req, State);
             {Status, Headers, Data} ->
