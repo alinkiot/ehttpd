@@ -47,7 +47,7 @@
 
 
 -spec init(Req :: ehttpd_req:req(), Opts :: map()) ->
-    {cowboy_rest, Req :: ehttpd_req:req(), Opts :: state()}.
+    {cowboy_rest | cowboy_loop, Req :: ehttpd_req:req(), Opts :: state()}.
 init(Req, #{
     name := Name,
     logic_handler := LogicHandler
@@ -86,6 +86,12 @@ init(Req, #{
                             name => Name,
                             version => Version
                         }
+                    }};
+                cowboy_loop ->
+                    {ok, Context} = ehttpd_router:get_state(Name, OperationId),
+                    {cowboy_rest, Req, State#state{
+                        operationid = OperationId,
+                        context = Context
                     }}
             end
     end.
