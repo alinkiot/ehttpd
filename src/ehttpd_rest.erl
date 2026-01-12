@@ -17,6 +17,7 @@
 %% Handlers
 -export([handle_request/2]).
 -export([handle_multipart/2]).
+-export([info/3]).
 
 -record(state, {
     name :: atom(),
@@ -63,41 +64,24 @@ init(Req, #{
             }};
         Method ->
             Version = ehttpd_req:get_qs(<<"version">>, Req),
-            OperationId = maps:get(Method, Map, <<"unknown">>),
-            case erlang:function_exported(LogicHandler, init, 2) andalso LogicHandler:init(Req, Map) of
+            OperationId = maps:get(Method, Map),
+            {ok, Context0} = ehttpd_router:get_state(Name, OperationId),
+            Context = Context0#{
+                name => Name,
+                version => Version
+            },
+            case erlang:function_exported(LogicHandler, init, 2) andalso LogicHandler:init(Req, Context) of
                 false ->
-                    {ok, Context} = ehttpd_router:get_state(Name, OperationId),
-                    NewContext = Context#{
-                        name => Name,
-                        version => Version
-                    },
-                    default_init(OperationId, Req, State, NewContext);
-                {Req1, undefined} ->
-                    {ok, Context} = ehttpd_router:get_state(Name, OperationId),
-                    NewContext = Context#{
-                        name => Name,
-                        version => Version
-                    },
-                    default_init(OperationId, Req1, State, NewContext);
-                {Req1, #{ operationid := NewOperationId } = Context} ->
-                    {cowboy_rest, Req1, State#state{
-                        operationid = NewOperationId,
-                        context = Context#{
-                            name => Name,
-                            version => Version
-                        }
-                    }};
-                cowboy_loop ->
-                    {ok, Context} = ehttpd_router:get_state(Name, OperationId),
-                    {cowboy_rest, Req, State#state{
-                        operationid = OperationId,
-                        context = Context
-                    }}
+                    reqeust_init(OperationId, cowboy_rest, Req, State, Context);
+                {Req1, NewContext} ->
+                    reqeust_init(OperationId, cowboy_rest, Req1, State, NewContext);
+                {Mod, Req1, NewContext} ->
+                    reqeust_init(OperationId, Mod, Req1, State, NewContext)
             end
     end.
 
-default_init(OperationId, Req, State, Context) ->
-    {cowboy_rest, Req, State#state{
+reqeust_init(OperationId, Mod, Req, State, Context) ->
+    {Mod, Req, State#state{
         operationid = OperationId,
         context = Context
     }}.
@@ -222,29 +206,39 @@ valid_entity_length(Req, State) ->
 
 -spec handle_multipart(ehttpd_req:req(), state()) -> response().
 handle_multipart(Req, State) ->
-    safe_handle_request(handle_multipart, Req, State).
+    Fun =  fun() -> check_multipart(State#state.context, Req, #{}) end,
+    safe_handle_request(Fun, Req, State).
 
 -spec handle_request(ehttpd_req:req(), state()) -> response().
 handle_request(Req, State) ->
-    safe_handle_request(handle_request, Req, State).
+    Fun =  fun() -> ehttpd_check:check_request(State#state.context, Req) end,
+    safe_handle_request(Fun, Req, State).
 
-safe_handle_request(Type, Req0, #state{
+
+-spec info(Message :: any(), Req :: ehttpd_req:req(), State :: state()) ->
+    {ok, Req :: ehttpd_req:req(), State :: state()} |
+    {ok, Req :: ehttpd_req:req(), State :: state(), hibernate} |
+    {stop, Req :: ehttpd_req:req(), State :: state()}.
+info(Message, Req, State) ->
+    Fun = fun() -> {ok, Message, Req} end,
+    safe_handle_request(Fun, Req, State).
+
+
+safe_handle_request(Fun, Req0, #state{
     operationid = OperationID,
     logic_handler = LogicHandler,
-    context = #{name := _SerName} = Context
+    context = Context
 } = State) ->
     try
-        {ok, Populated, Req} =
-            case Type of
-                handle_multipart ->
-                    check_multipart(Context, Req0, #{});
-                handle_request ->
-                    ehttpd_check:check_request(Context, Req0)
-            end,
+        {ok, Populated, Req} = Fun(),
         Args = [OperationID, Populated, Context, Req],
         case apply(LogicHandler, handle, Args) of
             {ok, Req} ->
                 {ok, Req, State};
+            {ok, Req, hibernate} ->
+                {ok, Req, State, hibernate};
+            {stop, Req} ->
+                {stop, Req, State};
             {Status, Data} ->
                 reply(Status, Data, Req, State);
             {Status, Headers, Data} ->
